@@ -1,0 +1,17 @@
+# general things to ignore
+build/
+dist/
+*.egg-info/
+*.egg
+*.py[cod]
+__pycache__/
+*.so
+*~
+
+src/rembg/saved_models
+
+examples/
+
+# due to using tox and pytest
+.tox
+.cache
