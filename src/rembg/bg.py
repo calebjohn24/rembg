@@ -8,84 +8,10 @@ from pymatting.foreground.estimate_foreground_ml import estimate_foreground_ml
 from pymatting.util.util import stack_images
 from scipy.ndimage.morphology import binary_erosion
 from PIL import Image, ImageEnhance
-import cv2
-import skimage
 
 
 from .u2net import detect
 
-
-
-def extact_alpha_channel(image):
-    """
-    Extracts alpha channel from RGBA image
-    :param image: RGBA pil image
-    :return: RGB Pil image
-    """
-    # Extract just the alpha channel
-    alpha = image.split()[-1]
-    # Create a new image with an opaque black background
-    bg = Image.new("RGBA", image.size, (0, 0, 0, 255))
-    # Copy the alpha channel to the new image using itself as the mask
-    bg.paste(alpha, mask=alpha)
-    return bg.convert("RGB")
-
-def blur_edges( imaged):
-    """
-    Blurs the edges of the image
-    :param imaged: RGBA Pil image
-    :return: RGBA PIL  image
-    """
-    image = np.array(imaged)
-    image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGRA)
-    # extract alpha channel
-    a = image[:, :, 3]
-    # blur alpha channel
-    ab = cv2.GaussianBlur(a, (0, 0), sigmaX=2, sigmaY=2, borderType=cv2.BORDER_DEFAULT)
-    # stretch so that 255 -> 255 and 127.5 -> 0
-    aa = skimage.exposure.rescale_intensity(ab, in_range=(140, 255), out_range=(0, 255))
-    # replace alpha channel in input with new alpha channel
-    out = image.copy()
-    out[:, :, 3] = aa
-    image = cv2.cvtColor(out, cv2.COLOR_BGRA2RGBA)
-    return Image.fromarray(image)
-
-def remove_too_transparent_borders( mask, tranp_val=240):
-    """
-    Marks all pixels in the mask with a transparency greater than $tranp_val as opaque.
-    Pixels with transparency less than $tranp_val, as fully transparent
-    :param tranp_val: Integer value.
-    :return: Processed mask
-    """
-    mask = np.array(mask.convert("L"))
-    height, weight = mask.shape
-    for h in range(height):
-        for w in range(weight):
-            val = mask[h, w]
-            if val > tranp_val:
-                mask[h, w] = 255
-            else:
-                mask[h, w] = 0
-    return Image.fromarray(mask)
-
-def run(image, orig_image):
-    """
-    Runs an image post-processing algorithm to improve background removal quality.
-    :param model: The class of the neural network used to remove the background.
-    :param image: Image without background
-    :param orig_image: Source image
-    """
-    mask = remove_too_transparent_borders(extact_alpha_channel(image))
-    empty = Image.new("RGBA", orig_image.size)
-    image = Image.composite(orig_image, empty, mask)
-    image = blur_edges(image)
-
-    mask = remove_too_transparent_borders(extact_alpha_channel(image))
-    empty = Image.new("RGBA", orig_image.size)
-    image = Image.composite(orig_image, empty, mask)
-    image = blur_edges(image)
-    image.save("cutout2.png")
-    return image
 
 def alpha_matting_cutout(
     img,
@@ -104,20 +30,25 @@ def alpha_matting_cutout(
     img = np.copy(np.asarray(img))
     mask = np.copy(np.asarray(mask))
 
-    
+    result_arr = np.dstack((img, mask))
+    result = Image.fromarray(result_arr)
+    result.save("rawmaskoverlay.png")
 
-    super_threshold_indices = mask < 50
-    mask[super_threshold_indices] = 0
-
-    super_threshold_indices = mask > 240
-    mask[super_threshold_indices] = 255
 
     mask_new = Image.fromarray(mask)
-    mask_new.save("mask.png")
+    mask_new.save("rawmask.png")
+    
+
+    super_threshold_indices = mask <= 30
+    mask[super_threshold_indices] = 0
+
+    super_threshold_indices = mask >= 240
+    mask[super_threshold_indices] = 255
+
 
     # guess likely foreground/background
     is_foreground = mask > 240
-    is_background = mask < 50
+    is_background = mask < 30
 
     erode_structure_size = 3
     # erode foreground/background
@@ -128,21 +59,12 @@ def alpha_matting_cutout(
     is_foreground = binary_erosion(is_foreground, structure=structure)
     is_background = binary_erosion(is_background, structure=structure, border_value=1)
 
-    # build trimap
-    # 0   = background
-    # 128 = unknown
-    # 255 = foreground
-    trimap = np.full(mask.shape, dtype=np.uint8, fill_value=0)
-
-    trimap[is_foreground] = 255
-    trimap[is_background] = 0
-
-    result_arr = np.dstack((img, trimap))
-    result = Image.fromarray(result_arr)
-    result.save("nomatting.png")
 
 
-    trimap = np.full(mask.shape, dtype=np.uint8, fill_value=200)
+    
+
+
+    trimap = np.full(mask.shape, dtype=np.uint8, fill_value=128)
     trimap[is_foreground] = 255
     trimap[is_background] = 0
 
@@ -154,33 +76,15 @@ def alpha_matting_cutout(
 
     alpha = estimate_alpha_cf(img_normalized, trimap_normalized)
     foreground = estimate_foreground_ml(img_normalized, alpha, gradient_weight=0.005)
-    cutout = stack_images(foreground, trimap)
+    cutout = stack_images(foreground, alpha)
 
     cutout = np.clip(cutout * 255, 0, 255).astype(np.uint8)
 
     
-    opacity = cutout[:, :, 3]
-    super_threshold_indices_low = cutout[:, :, 3] <= 20
-    super_threshold_indices_high = cutout[:, :, 3] >= 230
-    opacity[super_threshold_indices_low] = 0
-    opacity[super_threshold_indices_high] = 255
-
-    mid = (cutout[:, :, 3] > 180) & (cutout[:, :, 3] < 230)
-    opacity[mid] += 25
-
-    mid = (cutout[:, :, 3] > 100) & (cutout[:, :, 3] <= 180)
-    opacity[mid] += 40
-
-    mid = (cutout[:, :, 3] > 50) & (cutout[:, :, 3] <= 100)
-    opacity[mid] += 60
-
-    mid = (cutout[:, :, 3] > 20) & (cutout[:, :, 3] <= 50)
-    opacity[mid] += 110
 
     cutout = Image.fromarray(cutout)
     cutoutImg = Image.fromarray(np.copy(cutout))
     cutoutImg.save("cutout.png")
-    run(cutout, orig_image)
     cutout = cutout.resize(size, Image.LANCZOS)
 
     return cutout
@@ -222,11 +126,11 @@ def remove(
     enhancer_2 = ImageEnhance.Contrast(imgs)
 
 
-    factor = 1.1 #increase contrast
+    factor = 1.2 #increase contrast
     im_c = enhancer_2.enhance(factor)
     im_c.save('more-contrast-image.png')
 
-    factor = 1.2
+    factor = 1.3
     enhancer_3 = ImageEnhance.Color(im_c)
     im_color = enhancer_3.enhance(factor)
     im_color.save('more-saturation-image.png')
