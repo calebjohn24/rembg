@@ -8,10 +8,84 @@ from pymatting.foreground.estimate_foreground_ml import estimate_foreground_ml
 from pymatting.util.util import stack_images
 from scipy.ndimage.morphology import binary_erosion
 from PIL import Image, ImageEnhance
+import cv2
+import skimage
 
 
 from .u2net import detect
 
+
+
+def extact_alpha_channel(image):
+    """
+    Extracts alpha channel from RGBA image
+    :param image: RGBA pil image
+    :return: RGB Pil image
+    """
+    # Extract just the alpha channel
+    alpha = image.split()[-1]
+    # Create a new image with an opaque black background
+    bg = Image.new("RGBA", image.size, (0, 0, 0, 255))
+    # Copy the alpha channel to the new image using itself as the mask
+    bg.paste(alpha, mask=alpha)
+    return bg.convert("RGB")
+
+def blur_edges( imaged):
+    """
+    Blurs the edges of the image
+    :param imaged: RGBA Pil image
+    :return: RGBA PIL  image
+    """
+    image = np.array(imaged)
+    image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGRA)
+    # extract alpha channel
+    a = image[:, :, 3]
+    # blur alpha channel
+    ab = cv2.GaussianBlur(a, (0, 0), sigmaX=2, sigmaY=2, borderType=cv2.BORDER_DEFAULT)
+    # stretch so that 255 -> 255 and 127.5 -> 0
+    aa = skimage.exposure.rescale_intensity(ab, in_range=(140, 255), out_range=(0, 255))
+    # replace alpha channel in input with new alpha channel
+    out = image.copy()
+    out[:, :, 3] = aa
+    image = cv2.cvtColor(out, cv2.COLOR_BGRA2RGBA)
+    return Image.fromarray(image)
+
+def remove_too_transparent_borders( mask, tranp_val=240):
+    """
+    Marks all pixels in the mask with a transparency greater than $tranp_val as opaque.
+    Pixels with transparency less than $tranp_val, as fully transparent
+    :param tranp_val: Integer value.
+    :return: Processed mask
+    """
+    mask = np.array(mask.convert("L"))
+    height, weight = mask.shape
+    for h in range(height):
+        for w in range(weight):
+            val = mask[h, w]
+            if val > tranp_val:
+                mask[h, w] = 255
+            else:
+                mask[h, w] = 0
+    return Image.fromarray(mask)
+
+def run(image, orig_image):
+    """
+    Runs an image post-processing algorithm to improve background removal quality.
+    :param model: The class of the neural network used to remove the background.
+    :param image: Image without background
+    :param orig_image: Source image
+    """
+    mask = remove_too_transparent_borders(extact_alpha_channel(image))
+    empty = Image.new("RGBA", orig_image.size)
+    image = Image.composite(orig_image, empty, mask)
+    image = blur_edges(image)
+
+    mask = remove_too_transparent_borders(extact_alpha_channel(image))
+    empty = Image.new("RGBA", orig_image.size)
+    image = Image.composite(orig_image, empty, mask)
+    image = blur_edges(image)
+    image.save("cutout2.png")
+    return image
 
 def alpha_matting_cutout(
     img,
@@ -22,6 +96,7 @@ def alpha_matting_cutout(
     base_size,
 ):
     size = img.size
+    orig_image = img
 
     img.thumbnail((base_size, base_size), Image.LANCZOS)
     mask = mask.resize(img.size, Image.LANCZOS)
@@ -57,7 +132,7 @@ def alpha_matting_cutout(
     # 0   = background
     # 128 = unknown
     # 255 = foreground
-    trimap = np.full(mask.shape, dtype=np.uint8, fill_value=128)
+    trimap = np.full(mask.shape, dtype=np.uint8, fill_value=0)
 
     trimap[is_foreground] = 255
     trimap[is_background] = 0
@@ -105,6 +180,7 @@ def alpha_matting_cutout(
     cutout = Image.fromarray(cutout)
     cutoutImg = Image.fromarray(np.copy(cutout))
     cutoutImg.save("cutout.png")
+    run(cutout, orig_image)
     cutout = cutout.resize(size, Image.LANCZOS)
 
     return cutout
@@ -124,7 +200,6 @@ def get_model(model_name):
         return detect.load_model(model_name="u2net_human_seg")
     else:
         return detect.load_model(model_name="u2net")
-
 
 def remove(
     data,
@@ -151,7 +226,7 @@ def remove(
     im_c = enhancer_2.enhance(factor)
     im_c.save('more-contrast-image.png')
 
-    factor = 1.1
+    factor = 1.2
     enhancer_3 = ImageEnhance.Color(im_c)
     im_color = enhancer_3.enhance(factor)
     im_color.save('more-saturation-image.png')
@@ -163,17 +238,15 @@ def remove(
 
     mask = detect.predict(model, np.array(im_output)).convert("L")
 
-    if alpha_matting:
-        cutout = alpha_matting_cutout(
-            img,
-            mask,
-            alpha_matting_foreground_threshold,
-            alpha_matting_background_threshold,
-            alpha_matting_erode_structure_size,
-            alpha_matting_base_size,
-        )
-    else:
-        cutout = naive_cutout(img, mask)
+    cutout = alpha_matting_cutout(
+        img,
+        mask,
+        alpha_matting_foreground_threshold,
+        alpha_matting_background_threshold,
+        alpha_matting_erode_structure_size,
+        alpha_matting_base_size,
+    )
+
 
     bio = io.BytesIO()
     cutout.save(bio, "PNG")
