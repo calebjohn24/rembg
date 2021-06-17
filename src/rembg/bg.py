@@ -78,20 +78,29 @@ def alpha_matting_cutout(
     trimap_normalized = trimap / 255.0
 
     alpha = estimate_alpha_cf(img_normalized, trimap_normalized)
-    foreground = estimate_foreground_ml(img_normalized, alpha, gradient_weight=0.01)
-    cutout = stack_images(foreground, alpha)
+    foreground = estimate_foreground_ml(img_normalized, alpha, gradient_weight=0.005)
+    cutout = stack_images(foreground, trimap)
 
     cutout = np.clip(cutout * 255, 0, 255).astype(np.uint8)
 
     
-    
-    super_threshold_indices = cutout[:, :, 3] <= 10
-    cutout[:, :, 3][super_threshold_indices] = 0
+    opacity = cutout[:, :, 3]
+    super_threshold_indices_low = cutout[:, :, 3] <= 20
+    super_threshold_indices_high = cutout[:, :, 3] >= 230
+    opacity[super_threshold_indices_low] = 0
+    opacity[super_threshold_indices_high] = 255
 
+    mid = (cutout[:, :, 3] > 180) & (cutout[:, :, 3] < 230)
+    opacity[mid] += 25
 
+    mid = (cutout[:, :, 3] > 100) & (cutout[:, :, 3] <= 180)
+    opacity[mid] += 40
 
-    super_threshold_indices = cutout[:, :, 3] > 10
-    cutout[:, :, 3][super_threshold_indices] = 255
+    mid = (cutout[:, :, 3] > 50) & (cutout[:, :, 3] <= 100)
+    opacity[mid] += 60
+
+    mid = (cutout[:, :, 3] > 20) & (cutout[:, :, 3] <= 50)
+    opacity[mid] += 110
 
     cutout = Image.fromarray(cutout)
     cutoutImg = Image.fromarray(np.copy(cutout))
